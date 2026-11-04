@@ -1,25 +1,24 @@
 /**
- * Staff Zone Manager 1.9.2
- * OpenRCT2 - API 117+
+ * Staff Zone Manager 1.9.6 - OpenRCT2 API 117+
  *
- * CORRECOES:
- * - Zeladores dimensionados por cobertura + visitantes + trabalho.
- * - Remove recomendacao de um zelador por rede.
- * - Calcula caminhos relevantes para o parque.
- * - Identifica quando a conectividade e apenas aproximada.
- * - Mantem mecanicos por station.exit.
- * - Mantem os icones Geral, Mecanicos e Dimensionar.
- * - Substitui icones confusos por Z, S e A.
- * - Contratacao e rondas sempre manuais.
+ * Correcao:
+ * - Sprites dos funcionarios rotacionados 180 graus
+ *   em relacao a versao 1.9.5 (rotacao 0 -> 2).
  *
- * Dimensionamento experimental. Nao e formula oficial do jogo.
+ * Mantido:
+ * - Miniaturas estaticas e centralizadas.
+ * - Dimensionamento compacto e veredito direto.
+ * - Mecanicos por station.exit e area retangular.
+ * - Zeladores por caminhos e filas.
+ * - Contratacao e rondas manuais.
+ *
+ * Dimensionamento experimental.
  */
 
 (function () {
   "use strict";
 
-  var VERSION = "1.9.2";
-  var WINDOW = "staff-zone-manager-192";
+  var VERSION = "1.9.6";
 
   var CFG = {
     mechanicPadding: 6,
@@ -40,38 +39,44 @@
 
     inspectionPeriods: [10, 20, 30, 45, 60, 120, 0],
 
-    // Cobertura geografica: parametros experimentais.
     handymanTilesPerWorker: 85,
     handymanGuestsPerWorker: 170,
     handymanLitterPerWorker: 12,
 
-    minUsefulComponent: 3,
+    lowOccupancyThreshold: 100,
+    lowOccupancyFraction: 0.5,
+
+    // ALTERACAO DA 1.9.6:
+    // 0 mostrava as costas no seu teste.
+    // 2 seleciona a direcao oposta.
+    spriteRotation: 2,
+    spriteSize: 28,
   };
 
   var TYPES = {
     mechanic: {
-      title: "Mecanicos",
-      api: 1,
+      label: "Mecanicos",
+      number: 1,
       orders: 3,
     },
     handyman: {
-      title: "Zeladores",
-      api: 0,
+      label: "Zeladores",
+      number: 0,
       orders: 7,
     },
     security: {
-      title: "Seguranca",
-      api: 2,
+      label: "Seguranca",
+      number: 2,
       orders: 0,
     },
     entertainer: {
-      title: "Animadores",
-      api: 3,
+      label: "Animadores",
+      number: 3,
       orders: 0,
     },
   };
 
-  var TAB_NAMES = [
+  var TABS = [
     "general",
     "mechanic",
     "handyman",
@@ -80,7 +85,7 @@
     "dimension",
   ];
 
-  var TAB_LABELS = [
+  var LABELS = [
     "Geral",
     "Mecanicos",
     "Zeladores",
@@ -89,27 +94,26 @@
     "Dimensionar",
   ];
 
+  var WID = "staff-zone-manager-196";
+
   var S = {
     window: null,
     tab: 0,
-
     analyzed: false,
     busy: false,
     hiring: false,
 
     normalNodes: [],
     normalMap: {},
-
     handNodes: [],
     handMap: {},
 
     components: [],
     networkMode: "nao analisada",
-    pathLinks: 0,
 
-    usefulTiles: 0,
     totalTiles: 0,
     queueTiles: 0,
+    usefulTiles: 0,
 
     exits: [],
     hotspots: [],
@@ -129,6 +133,10 @@
     dimension: null,
 
     status: "Clique em Analisar parque.",
+
+    thumbnails: {},
+    thumbnailRange: null,
+    sprites: {},
   };
 
   var TAB_WIDGETS = {
@@ -144,35 +152,35 @@
   // UTILITARIOS
   // ============================================================
 
-  function num(v, fallback) {
-    return typeof v === "number" && isFinite(v) ? v : fallback || 0;
+  function number(value, fallback) {
+    return typeof value === "number" && isFinite(value) ? value : fallback || 0;
   }
 
-  function tile(v) {
-    return Math.floor(num(v) / 32);
+  function tile(value) {
+    return Math.floor(number(value) / 32);
   }
 
-  function key(x, y) {
+  function pos(x, y) {
     return x + "," + y;
   }
 
-  function nodeKey(x, y, i) {
-    return x + "," + y + "," + i;
+  function nodeId(x, y, index) {
+    return x + "," + y + "," + index;
   }
 
-  function clamp(v, min, max) {
-    return Math.max(min, Math.min(v, max));
+  function clamp(value, min, max) {
+    return Math.max(min, Math.min(max, value));
   }
 
-  function format(v) {
-    return num(v).toFixed(1).replace(".", ",");
+  function fmt(value) {
+    return number(value).toFixed(1).replace(".", ",");
   }
 
   function ticks() {
-    return num(date.ticksElapsed);
+    return number(date.ticksElapsed);
   }
 
-  function getEntities(type) {
+  function entities(type) {
     try {
       return map.getAllEntities(type) || [];
     } catch (e) {
@@ -180,28 +188,31 @@
     }
   }
 
-  function getStaff(type) {
-    return getEntities("staff").filter(function (p) {
+  function staff(type) {
+    return entities("staff").filter(function (p) {
       return p.staffType === type;
     });
   }
 
-  function getRides() {
+  function rides() {
     return (map.rides || []).filter(function (r) {
       return r && r.classification === "ride";
     });
   }
 
-  function getError(result) {
+  function actionError(result) {
+    if (!result) {
+      return "";
+    }
+
     return (
-      result &&
-      (result.errorMessage ||
-        result.errorTitle ||
-        (result.error ? String(result.error) : ""))
+      result.errorMessage ||
+      result.errorTitle ||
+      (result.error ? String(result.error) : "")
     );
   }
 
-  function getSetting(name, fallback) {
+  function setting(name, fallback) {
     try {
       var value = context.sharedStorage.get(name);
       return value == null ? fallback : value;
@@ -210,31 +221,31 @@
     }
   }
 
-  function setSetting(name, value) {
+  function saveSetting(name, value) {
     try {
       context.sharedStorage.set(name, value);
     } catch (e) {}
   }
 
-  function setStatus(message) {
+  function status(message) {
     S.status = message;
     render();
   }
 
   function guestCount() {
-    return getEntities("guest").filter(function (g) {
-      return g.isInPark;
+    return entities("guest").filter(function (p) {
+      return p.isInPark;
     }).length;
   }
 
   // ============================================================
-  // ANALISE DOS CAMINHOS
+  // CAMINHOS
   // ============================================================
 
   function scanPaths() {
     S.normalNodes = [];
-    S.normalMap = {};
     S.handNodes = [];
+    S.normalMap = {};
     S.handMap = {};
 
     var allTiles = {};
@@ -244,34 +255,36 @@
       for (var x = 0; x < map.size.x; x++) {
         var cell = map.getTile(x, y);
 
-        if (!cell) continue;
+        if (!cell) {
+          continue;
+        }
 
         for (var i = 0; i < cell.numElements; i++) {
-          var e = cell.getElement(i);
+          var element = cell.getElement(i);
 
-          if (!e || e.type !== "footpath" || e.isGhost) {
+          if (!element || element.type !== "footpath" || element.isGhost) {
             continue;
           }
 
-          var p = {
+          var node = {
             x: x,
             y: y,
-            z: num(e.baseZ),
+            z: number(element.baseZ),
             index: i,
-            queue: !!e.isQueue,
-            id: nodeKey(x, y, i),
+            queue: !!element.isQueue,
+            id: nodeId(x, y, i),
           };
 
-          S.handNodes.push(p);
-          S.handMap[p.id] = p;
+          S.handNodes.push(node);
+          S.handMap[node.id] = node;
 
-          allTiles[key(x, y)] = true;
+          allTiles[pos(x, y)] = true;
 
-          if (e.isQueue) {
-            queueTiles[key(x, y)] = true;
+          if (element.isQueue) {
+            queueTiles[pos(x, y)] = true;
           } else {
-            S.normalNodes.push(p);
-            S.normalMap[p.id] = p;
+            S.normalNodes.push(node);
+            S.normalMap[node.id] = node;
           }
         }
       }
@@ -281,61 +294,64 @@
     S.queueTiles = Object.keys(queueTiles).length;
   }
 
-  function pathNeighbors(p, includeQueues) {
+  function pathNeighbors(node, includeQueues) {
     if (typeof map.getPathNavigator !== "function") {
       return [];
     }
 
-    var nav;
-
     try {
-      nav = map.getPathNavigator({ x: p.x, y: p.y }, p.index, {
-        respectBanners: false,
-        includeGhosts: false,
-        includeQueues: includeQueues,
-        includeWidePaths: true,
+      var navigator = map.getPathNavigator(
+        {
+          x: node.x,
+          y: node.y,
+        },
+        node.index,
+        {
+          respectBanners: false,
+          includeGhosts: false,
+          includeQueues: includeQueues,
+          includeWidePaths: true,
+        },
+      );
+
+      if (!navigator) {
+        return [];
+      }
+
+      var lookup = includeQueues ? S.handMap : S.normalMap;
+
+      var output = [];
+      var connections = navigator.getConnectedPaths() || [];
+
+      connections.forEach(function (connection) {
+        if (!connection || !connection.position) {
+          return;
+        }
+
+        var neighbor =
+          lookup[
+            nodeId(
+              tile(connection.position.x),
+              tile(connection.position.y),
+              connection.elementIndex,
+            )
+          ];
+
+        if (neighbor) {
+          output.push(neighbor);
+        }
       });
+
+      return output;
     } catch (e) {
       return [];
     }
-
-    if (!nav) return [];
-
-    var connections;
-
-    try {
-      connections = nav.getConnectedPaths() || [];
-    } catch (e) {
-      return [];
-    }
-
-    var lookup = includeQueues ? S.handMap : S.normalMap;
-
-    var result = [];
-
-    connections.forEach(function (c) {
-      if (!c || !c.position) return;
-
-      var p2 =
-        lookup[nodeKey(tile(c.position.x), tile(c.position.y), c.elementIndex)];
-
-      if (p2) result.push(p2);
-    });
-
-    return result;
   }
 
-  /*
-   * Fallback por adjacencia:
-   * apenas diagnostico aproximado de conectividade.
-   *
-   * Nao representa necessariamente as conexoes reais
-   * entre rampas ou caminhos com restricoes especiais.
-   */
-  function fallbackNeighbors(p, includeQueues) {
+  function approximateNeighbors(node, includeQueues) {
     var lookup = includeQueues ? S.handMap : S.normalMap;
 
-    var result = [];
+    var output = [];
 
     [
       [-1, 0],
@@ -343,57 +359,62 @@
       [0, -1],
       [0, 1],
     ].forEach(function (delta) {
-      var x = p.x + delta[0];
-      var y = p.y + delta[1];
+      var x = node.x + delta[0];
+      var y = node.y + delta[1];
 
       if (x < 0 || y < 0 || x >= map.size.x || y >= map.size.y) {
         return;
       }
 
       var cell = map.getTile(x, y);
-      if (!cell) return;
+
+      if (!cell) {
+        return;
+      }
 
       for (var i = 0; i < cell.numElements; i++) {
-        var q = lookup[nodeKey(x, y, i)];
+        var candidate = lookup[nodeId(x, y, i)];
 
-        if (q && q.z === p.z) {
-          result.push(q);
+        if (candidate && candidate.z === node.z) {
+          output.push(candidate);
         }
       }
     });
 
-    return result;
+    return output;
   }
 
-  function neighbors(p, hand) {
+  function neighbors(node, includeQueues) {
     if (S.networkMode === "aproximada") {
-      return fallbackNeighbors(p, hand);
+      return approximateNeighbors(node, includeQueues);
     }
 
-    return pathNeighbors(p, hand);
+    return pathNeighbors(node, includeQueues);
   }
 
-  function buildComponents() {
+  function components() {
     var visited = {};
     var result = [];
 
     S.handNodes.forEach(function (start) {
-      if (visited[start.id]) return;
+      if (visited[start.id]) {
+        return;
+      }
 
       var queue = [start];
-      var index = 0;
+      var head = 0;
       var nodes = [];
       var tiles = {};
 
       visited[start.id] = true;
 
-      while (index < queue.length) {
-        var p = queue[index++];
+      while (head < queue.length) {
+        var node = queue[head++];
 
-        nodes.push(p);
-        tiles[key(p.x, p.y)] = true;
+        nodes.push(node);
+        tiles[pos(node.x, node.y)] = true;
 
-        neighbors(p, true).forEach(function (next) {
+        neighbors(node, true).forEach(function (next) {
           if (!visited[next.id]) {
             visited[next.id] = true;
             queue.push(next);
@@ -412,19 +433,22 @@
 
     var guestTiles = {};
 
-    getEntities("guest").forEach(function (g) {
-      if (!g.isInPark) return;
+    entities("guest").forEach(function (guest) {
+      if (!guest.isInPark) {
+        return;
+      }
 
-      var k = key(tile(g.x), tile(g.y));
-      guestTiles[k] = (guestTiles[k] || 0) + 1;
+      var position = pos(tile(guest.x), tile(guest.y));
+
+      guestTiles[position] = (guestTiles[position] || 0) + 1;
     });
 
-    result.forEach(function (c) {
-      Object.keys(c.tiles).forEach(function (k) {
-        c.guests += guestTiles[k] || 0;
+    result.forEach(function (component) {
+      Object.keys(component.tiles).forEach(function (position) {
+        component.guests += guestTiles[position] || 0;
       });
 
-      c.score = c.count + c.guests * 3;
+      component.score = component.count + component.guests * 3;
     });
 
     result.sort(function (a, b) {
@@ -434,47 +458,38 @@
     return result;
   }
 
-  /*
-   * Define caminhos relevantes para os zeladores.
-   *
-   * Redes com visitantes sao relevantes.
-   * Redes grandes tambem sao consideradas.
-   *
-   * O numero de redes NAO determina a
-   * quantidade de funcionarios.
-   */
   function usefulComponents() {
-    var components = S.components.filter(function (c) {
-      return c.guests > 0 || c.count >= CFG.minUsefulComponent;
+    var useful = S.components.filter(function (component) {
+      return component.count >= 3 || component.guests > 0;
     });
 
-    if (!components.length && S.components.length) {
-      components = [S.components[0]];
+    if (useful.length) {
+      return useful;
     }
 
-    return components;
+    return S.components.length ? [S.components[0]] : [];
   }
 
-  function countUsefulTiles() {
-    var unique = {};
+  function usefulTiles() {
+    var seen = {};
 
-    usefulComponents().forEach(function (c) {
-      Object.keys(c.tiles).forEach(function (k) {
-        unique[k] = true;
+    usefulComponents().forEach(function (component) {
+      Object.keys(component.tiles).forEach(function (position) {
+        seen[position] = true;
       });
     });
 
-    return Object.keys(unique).length;
+    return Object.keys(seen).length;
   }
 
   // ============================================================
-  // MECANICOS - SAIDAS DAS ATRACOES
+  // MECANICOS - STATION.EXIT
   // ============================================================
 
   function collectExits() {
-    var exits = [];
+    var output = [];
 
-    getRides().forEach(function (ride) {
+    rides().forEach(function (ride) {
       (ride.stations || []).forEach(function (station) {
         if (
           !station ||
@@ -487,20 +502,22 @@
           return;
         }
 
-        exits.push({
+        output.push({
           x: tile(station.exit.x),
           y: tile(station.exit.y),
-          z: num(station.exit.z),
+          z: number(station.exit.z),
           rideId: ride.id,
         });
       });
     });
 
-    return exits;
+    return output;
   }
 
   function clusterExits(exits, count) {
-    if (!count || !exits.length) return [];
+    if (!exits.length || !count) {
+      return [];
+    }
 
     if (count >= exits.length) {
       var repeated = [];
@@ -512,71 +529,69 @@
       return repeated;
     }
 
-    var selected = [exits[0]];
+    var seeds = [exits[0]];
 
-    while (selected.length < count) {
+    while (seeds.length < count) {
       var best = null;
-      var maxDistance = -1;
+      var farthest = -1;
 
-      exits.forEach(function (p) {
-        var distance = Infinity;
+      exits.forEach(function (point) {
+        var nearest = Infinity;
 
-        selected.forEach(function (s) {
-          distance = Math.min(
-            distance,
-            Math.abs(p.x - s.x) + Math.abs(p.y - s.y),
+        seeds.forEach(function (seed) {
+          nearest = Math.min(
+            nearest,
+            Math.abs(point.x - seed.x) + Math.abs(point.y - seed.y),
           );
         });
 
-        if (distance > maxDistance) {
-          maxDistance = distance;
-          best = p;
+        if (nearest > farthest) {
+          farthest = nearest;
+          best = point;
         }
       });
 
-      if (!best) break;
+      if (!best) {
+        break;
+      }
 
-      selected.push(best);
+      seeds.push(best);
     }
 
-    var groups = selected.map(function () {
+    var groups = seeds.map(function () {
       return [];
     });
 
-    exits.forEach(function (p) {
+    exits.forEach(function (point) {
       var best = 0;
-      var distance = Infinity;
+      var minimum = Infinity;
 
-      selected.forEach(function (s, i) {
-        var d = Math.abs(p.x - s.x) + Math.abs(p.y - s.y);
+      seeds.forEach(function (seed, index) {
+        var distance = Math.abs(point.x - seed.x) + Math.abs(point.y - seed.y);
 
-        if (d < distance) {
-          distance = d;
-          best = i;
+        if (distance < minimum) {
+          minimum = distance;
+          best = index;
         }
       });
 
-      groups[best].push(p);
+      groups[best].push(point);
     });
 
     return groups;
   }
 
   function mechanicZone(group) {
-    /*
-     * Mantem o metodo aprovado:
-     * saida real + padding + area retangular.
-     */
     var minX = Infinity;
     var minY = Infinity;
     var maxX = -1;
     var maxY = -1;
 
-    group.forEach(function (p) {
-      minX = Math.min(minX, p.x);
-      minY = Math.min(minY, p.y);
-      maxX = Math.max(maxX, p.x);
-      maxY = Math.max(maxY, p.y);
+    group.forEach(function (point) {
+      minX = Math.min(minX, point.x);
+      minY = Math.min(minY, point.y);
+      maxX = Math.max(maxX, point.x);
+      maxY = Math.max(maxY, point.y);
     });
 
     minX = clamp(minX - CFG.mechanicPadding, 0, map.size.x - 1);
@@ -591,7 +606,7 @@
 
     for (var y = minY; y <= maxY; y++) {
       for (var x = minX; x <= maxX; x++) {
-        tiles[key(x, y)] = true;
+        tiles[pos(x, y)] = true;
       }
     }
 
@@ -609,51 +624,56 @@
   // HOTSPOTS
   // ============================================================
 
-  function findHotspots() {
+  function hotspots() {
     var cells = {};
 
-    getEntities("guest").forEach(function (g) {
-      if (!g.isInPark) return;
+    entities("guest").forEach(function (guest) {
+      if (!guest.isInPark) {
+        return;
+      }
 
-      var k = key(Math.floor(tile(g.x) / 6), Math.floor(tile(g.y) / 6));
+      var position = pos(
+        Math.floor(tile(guest.x) / 6),
+        Math.floor(tile(guest.y) / 6),
+      );
 
-      if (!cells[k]) {
-        cells[k] = {
+      if (!cells[position]) {
+        cells[position] = {
           count: 0,
           x: 0,
           y: 0,
         };
       }
 
-      cells[k].count++;
-      cells[k].x += g.x;
-      cells[k].y += g.y;
+      cells[position].count++;
+      cells[position].x += guest.x;
+      cells[position].y += guest.y;
     });
 
     S.hotspots = Object.keys(cells)
-      .map(function (k) {
-        var cell = cells[k];
-        var best = null;
-        var distance = Infinity;
+      .map(function (position) {
+        var cell = cells[position];
+        var closest = null;
+        var minimum = Infinity;
 
-        S.normalNodes.forEach(function (p) {
-          var d =
-            Math.abs(p.x - tile(cell.x / cell.count)) +
-            Math.abs(p.y - tile(cell.y / cell.count));
+        S.normalNodes.forEach(function (node) {
+          var distance =
+            Math.abs(node.x - tile(cell.x / cell.count)) +
+            Math.abs(node.y - tile(cell.y / cell.count));
 
-          if (d < distance) {
-            distance = d;
-            best = p;
+          if (distance < minimum) {
+            minimum = distance;
+            closest = node;
           }
         });
 
         return {
-          node: best,
+          node: closest,
           count: cell.count,
         };
       })
-      .filter(function (h) {
-        return !!h.node;
+      .filter(function (hotspot) {
+        return !!hotspot.node;
       })
       .sort(function (a, b) {
         return b.count - a.count;
@@ -662,7 +682,7 @@
 
   function analyze() {
     if (typeof map.getPathNavigator !== "function") {
-      setStatus("PathNavigator indisponivel.");
+      status("PathNavigator indisponivel.");
       return;
     }
 
@@ -670,33 +690,29 @@
       scanPaths();
       S.exits = collectExits();
 
-      // Verifica se o navegador devolve ligacoes.
+      var examined = Math.min(S.handNodes.length, 400);
       var links = 0;
 
-      var samples = Math.min(S.handNodes.length, 400);
-
-      for (var i = 0; i < samples; i++) {
+      for (var i = 0; i < examined; i++) {
         links += pathNeighbors(S.handNodes[i], true).length;
       }
 
-      S.pathLinks = links;
-
       S.networkMode =
-        samples > 10 && links === 0 ? "aproximada" : "PathNavigator";
+        examined > 10 && links === 0 ? "aproximada" : "PathNavigator";
 
-      S.components = buildComponents();
-      S.usefulTiles = countUsefulTiles();
+      S.components = components();
+      S.usefulTiles = usefulTiles();
 
-      findHotspots();
+      hotspots();
 
       S.analyzed = true;
 
-      setStatus(
-        "Analise concluida: " +
+      status(
+        "Analisado: " +
           S.totalTiles +
-          " tiles; " +
+          " tiles, " +
           S.usefulTiles +
-          " relevantes; " +
+          " relevantes, " +
           S.components.length +
           " redes (" +
           S.networkMode +
@@ -705,44 +721,51 @@
 
       dimension();
     } catch (e) {
-      setStatus("Erro na analise: " + e);
+      status("Erro de analise: " + e);
     }
   }
 
   // ============================================================
-  // DISTRIBUICAO DOS ZELADORES
+  // RONDAS
   // ============================================================
 
   function chooseSeeds(nodes, count) {
-    if (!nodes.length || count <= 0) return [];
+    if (!nodes.length || count <= 0) {
+      return [];
+    }
 
     var selected = [nodes[0]];
 
     while (selected.length < Math.min(nodes.length, count)) {
       var best = null;
-      var maxDistance = -1;
+      var farthest = -1;
 
-      nodes.forEach(function (p) {
-        if (selected.indexOf(p) >= 0) return;
+      nodes.forEach(function (point) {
+        if (selected.indexOf(point) >= 0) {
+          return;
+        }
 
-        var distance = Infinity;
+        var nearest = Infinity;
 
-        selected.forEach(function (q) {
-          var d =
-            Math.abs(p.x - q.x) +
-            Math.abs(p.y - q.y) +
-            Math.abs(p.z - q.z) / 32;
+        selected.forEach(function (seed) {
+          var distance =
+            Math.abs(point.x - seed.x) +
+            Math.abs(point.y - seed.y) +
+            Math.abs(point.z - seed.z) / 32;
 
-          distance = Math.min(distance, d);
+          nearest = Math.min(nearest, distance);
         });
 
-        if (distance > maxDistance) {
-          maxDistance = distance;
-          best = p;
+        if (nearest > farthest) {
+          farthest = nearest;
+          best = point;
         }
       });
 
-      if (!best) break;
+      if (!best) {
+        break;
+      }
+
       selected.push(best);
     }
 
@@ -750,129 +773,134 @@
   }
 
   function splitComponent(component, count) {
-    var selected = chooseSeeds(component.nodes, count);
+    var seeds = chooseSeeds(component.nodes, count);
 
     var zones = [];
     var owner = {};
     var queue = [];
     var head = 0;
 
-    selected.forEach(function (p, i) {
+    seeds.forEach(function (point, index) {
       zones.push({});
-      zones[i][key(p.x, p.y)] = true;
-      owner[p.id] = i;
+      zones[index][pos(point.x, point.y)] = true;
+
+      owner[point.id] = index;
 
       queue.push({
-        node: p,
-        owner: i,
+        point: point,
+        owner: index,
       });
     });
 
     while (head < queue.length) {
-      var cur = queue[head++];
+      var current = queue[head++];
 
-      neighbors(cur.node, true).forEach(function (p) {
-        if (owner[p.id] !== undefined) return;
+      neighbors(current.point, true).forEach(function (point) {
+        if (owner[point.id] !== undefined) {
+          return;
+        }
 
-        owner[p.id] = cur.owner;
+        owner[point.id] = current.owner;
 
-        zones[cur.owner][key(p.x, p.y)] = true;
+        zones[current.owner][pos(point.x, point.y)] = true;
 
         queue.push({
-          node: p,
-          owner: cur.owner,
+          point: point,
+          owner: current.owner,
         });
       });
     }
 
     return {
       zones: zones,
-      centers: selected,
+      centers: seeds,
     };
   }
 
-  function allocate(components, workers) {
+  function allocate(components, count) {
     var result = components.map(function () {
       return 0;
     });
 
-    var left = workers;
+    var remaining = count;
 
-    for (var i = 0; i < components.length && left > 0; i++) {
+    for (var i = 0; i < components.length && remaining > 0; i++) {
       result[i]++;
-      left--;
+      remaining--;
     }
 
-    while (left > 0 && components.length) {
+    while (remaining > 0 && components.length) {
       var best = 0;
-      var bestScore = -1;
+      var maximum = -1;
 
-      components.forEach(function (c, i) {
-        var score = c.score / (result[i] + 1);
+      components.forEach(function (component, index) {
+        var score = component.score / (result[index] + 1);
 
-        if (score > bestScore) {
-          bestScore = score;
-          best = i;
+        if (score > maximum) {
+          maximum = score;
+          best = index;
         }
       });
 
       result[best]++;
-      left--;
+      remaining--;
     }
 
     return result;
   }
 
-  function flood(start, depth) {
+  function flood(start, limit) {
     var queue = [
       {
-        node: start,
+        point: start,
         depth: 0,
       },
     ];
 
-    var visited = {};
-    var result = {};
     var head = 0;
+    var visited = {};
+    var tiles = {};
 
     while (head < queue.length) {
-      var cur = queue[head++];
-      var p = cur.node;
+      var current = queue[head++];
+      var point = current.point;
 
-      if (visited[p.id]) continue;
+      if (visited[point.id]) {
+        continue;
+      }
 
-      visited[p.id] = true;
-      result[key(p.x, p.y)] = true;
+      visited[point.id] = true;
+      tiles[pos(point.x, point.y)] = true;
 
-      if (cur.depth >= depth) continue;
+      if (current.depth >= limit) {
+        continue;
+      }
 
-      neighbors(p, false).forEach(function (next) {
+      neighbors(point, false).forEach(function (next) {
         if (!visited[next.id]) {
           queue.push({
-            node: next,
-            depth: cur.depth + 1,
+            point: next,
+            depth: current.depth + 1,
           });
         }
       });
     }
 
-    return result;
+    return tiles;
   }
-
-  // ============================================================
-  // EXECUCAO DAS RONDAS
-  // ============================================================
 
   function compressRuns(tiles) {
     var rows = {};
-    var runs = [];
+    var output = [];
 
-    Object.keys(tiles).forEach(function (k) {
-      var parts = k.split(",");
-      var x = +parts[0];
-      var y = +parts[1];
+    Object.keys(tiles).forEach(function (position) {
+      var parts = position.split(",");
+      var x = Number(parts[0]);
+      var y = Number(parts[1]);
 
-      if (!rows[y]) rows[y] = [];
+      if (!rows[y]) {
+        rows[y] = [];
+      }
 
       rows[y].push(x);
     });
@@ -883,27 +911,27 @@
       });
 
       var start = xs[0];
-      var prev = xs[0];
+      var previous = xs[0];
 
       for (var i = 1; i <= xs.length; i++) {
-        if (i < xs.length && xs[i] === prev + 1) {
-          prev = xs[i];
+        if (i < xs.length && xs[i] === previous + 1) {
+          previous = xs[i];
           continue;
         }
 
-        runs.push({
+        output.push({
           x1: start * 32,
-          y1: +y * 32,
-          x2: prev * 32,
-          y2: +y * 32,
+          y1: Number(y) * 32,
+          x2: previous * 32,
+          y2: Number(y) * 32,
         });
 
         start = xs[i];
-        prev = xs[i];
+        previous = xs[i];
       }
     });
 
-    return runs;
+    return output;
   }
 
   function applyPatrol(id, tiles, done) {
@@ -921,8 +949,8 @@
         mode: 2,
       },
       function (result) {
-        if (getError(result)) {
-          done(getError(result));
+        if (actionError(result)) {
+          done(actionError(result));
           return;
         }
 
@@ -944,9 +972,9 @@
               y2: run.y2,
               mode: 0,
             },
-            function (r) {
-              if (getError(r)) {
-                done(getError(r));
+            function (response) {
+              if (actionError(response)) {
+                done(actionError(response));
               } else {
                 next();
               }
@@ -961,28 +989,31 @@
 
   function applyZones(type, zones) {
     if (S.busy) {
-      setStatus("Ja existe uma operacao em andamento.");
+      status("Ja existe uma operacao de ronda em andamento.");
       return;
     }
 
-    var available = getStaff(type).slice();
+    var available = staff(type).slice();
     var assigned = [];
 
     zones = zones.slice(0, available.length);
 
-    zones.forEach(function (z) {
-      if (!available.length) return;
+    zones.forEach(function (zone) {
+      if (!available.length) {
+        return;
+      }
 
       var best = 0;
-      var bestDistance = Infinity;
+      var minimum = Infinity;
 
-      available.forEach(function (p, i) {
-        var d =
-          Math.abs(tile(p.x) - z.center.x) + Math.abs(tile(p.y) - z.center.y);
+      available.forEach(function (person, index) {
+        var distance =
+          Math.abs(tile(person.x) - zone.center.x) +
+          Math.abs(tile(person.y) - zone.center.y);
 
-        if (d < bestDistance) {
-          bestDistance = d;
-          best = i;
+        if (distance < minimum) {
+          minimum = distance;
+          best = index;
         }
       });
 
@@ -990,47 +1021,46 @@
     });
 
     if (!assigned.length) {
-      setStatus("Nenhum funcionario contratado.");
+      status("Nenhum funcionario contratado.");
       return;
     }
 
     S.busy = true;
     S.zones[type] = [];
 
-    var i = 0;
-    var ok = 0;
-    var failures = 0;
+    var index = 0;
+    var completed = 0;
+    var failed = 0;
 
     function next() {
-      if (i >= assigned.length) {
+      if (index >= assigned.length) {
         S.busy = false;
 
-        setStatus(
-          TYPES[type].title +
+        status(
+          TYPES[type].label +
             ": " +
-            ok +
+            completed +
             " rondas aplicadas; " +
-            failures +
+            failed +
             " erros.",
         );
 
         return;
       }
 
-      var worker = assigned[i];
-      var zone = zones[i];
+      var person = assigned[index];
+      var zone = zones[index++];
 
-      i++;
-
-      applyPatrol(worker.id, zone.tiles, function (err) {
+      applyPatrol(person.id, zone.tiles, function (err) {
         if (err) {
-          failures++;
+          failed++;
+
           console.log("[Staff Zone Manager] " + err);
         } else {
-          ok++;
+          completed++;
 
           S.zones[type].push({
-            id: worker.id,
+            id: person.id,
             tiles: Object.keys(zone.tiles).length,
           });
         }
@@ -1044,26 +1074,24 @@
 
   function generate(type) {
     if (!S.analyzed) {
-      setStatus("Analise o parque primeiro.");
+      status("Analise o parque primeiro.");
       return;
     }
 
-    var count = getStaff(type).length;
+    var count = staff(type).length;
 
     if (!count) {
-      setStatus("Nenhum funcionario contratado.");
+      status("Nenhum funcionario contratado.");
       return;
     }
 
     if (type === "mechanic") {
-      /*
-       * MECANICOS:
-       * algoritmo por station.exit preservado.
-       */
+      // Preservado: station.exit + zonas retangulares.
+
       var exits = collectExits();
 
       if (!exits.length) {
-        setStatus("Nenhuma saida valida.");
+        status("Nenhuma saida de atracao valida.");
         return;
       }
 
@@ -1073,19 +1101,24 @@
     }
 
     if (type === "handyman") {
-      var components = usefulComponents();
-      var amounts = allocate(components, count);
+      var comps = usefulComponents();
+      var amounts = allocate(comps, count);
       var zones = [];
 
-      components.forEach(function (c, i) {
-        if (!amounts[i]) return;
+      comps.forEach(function (component, index) {
+        if (!amounts[index]) {
+          return;
+        }
 
-        var result = splitComponent(c, Math.min(amounts[i], c.nodes.length));
+        var parts = splitComponent(
+          component,
+          Math.min(amounts[index], component.nodes.length),
+        );
 
-        result.zones.forEach(function (tiles, j) {
+        parts.zones.forEach(function (zone, i) {
           zones.push({
-            tiles: tiles,
-            center: result.centers[j],
+            tiles: zone,
+            center: parts.centers[i],
           });
         });
       });
@@ -1094,57 +1127,59 @@
       return;
     }
 
-    var sources = S.hotspots.map(function (h) {
-      return h.node;
+    var source = S.hotspots.map(function (hotspot) {
+      return hotspot.node;
     });
 
-    if (!sources.length) {
-      sources = S.normalNodes;
+    if (!source.length) {
+      source = S.normalNodes;
     }
 
-    if (!sources.length) {
-      setStatus("Nenhum caminho encontrado.");
+    if (!source.length) {
+      status("Nenhum caminho encontrado.");
       return;
     }
 
-    var chosen = chooseSeeds(sources, Math.min(count, sources.length));
+    var selected = chooseSeeds(source, Math.min(count, source.length));
 
-    var zonesOther = [];
+    var otherZones = [];
 
-    for (var j = 0; j < count; j++) {
-      var seed = chosen[j % chosen.length];
+    for (var i = 0; i < count; i++) {
+      var origin = selected[i % selected.length];
 
-      zonesOther.push({
+      otherZones.push({
         tiles: flood(
-          seed,
+          origin,
           type === "security" ? CFG.securityDepth : CFG.entertainerDepth,
         ),
-        center: seed,
+        center: origin,
       });
     }
 
-    applyZones(type, zonesOther);
+    applyZones(type, otherZones);
   }
 
   function clearPatrols(type) {
-    if (S.busy) return;
+    if (S.busy) {
+      return;
+    }
 
-    var workers = getStaff(type);
-    var left = workers.length;
-    var errors = 0;
+    var people = staff(type);
+    var remaining = people.length;
+    var failed = 0;
 
-    if (!left) {
-      setStatus("Nenhum funcionario.");
+    if (!remaining) {
+      status("Nenhum funcionario.");
       return;
     }
 
     S.busy = true;
 
-    workers.forEach(function (p) {
+    people.forEach(function (person) {
       context.executeAction(
         "staffsetpatrolarea",
         {
-          id: p.id,
+          id: person.id,
           x1: 0,
           y1: 0,
           x2: 0,
@@ -1152,39 +1187,49 @@
           mode: 2,
         },
         function (result) {
-          if (getError(result)) errors++;
+          if (actionError(result)) {
+            failed++;
+          }
 
-          left--;
+          remaining--;
 
-          if (!left) {
+          if (remaining === 0) {
             S.busy = false;
             S.zones[type] = [];
 
-            setStatus("Rondas removidas. Erros: " + errors);
+            status("Rondas removidas. Erros: " + failed);
           }
         },
       );
     });
   }
 
+  // ============================================================
+  // CONTRATACAO
+  // ============================================================
+
   function hire(type) {
-    if (S.hiring) return;
+    if (S.hiring) {
+      return;
+    }
 
     S.hiring = true;
 
     var meta = TYPES[type];
     var costume = 0;
 
+    status("Contratando " + meta.label + "...");
+
     function attempt() {
       var args = {
         autoPosition: true,
-        staffType: meta.api,
+        staffType: meta.number,
         costumeIndex: costume,
         staffOrders: meta.orders,
       };
 
-      context.queryAction("staffhire", args, function (result) {
-        if (getError(result)) {
+      context.queryAction("staffhire", args, function (query) {
+        if (actionError(query)) {
           if (type === "entertainer" && costume < 15) {
             costume++;
             attempt();
@@ -1193,39 +1238,40 @@
 
           S.hiring = false;
 
-          setStatus("Falha: " + getError(result));
+          status("Falha: " + actionError(query));
+
           return;
         }
 
-        context.executeAction("staffhire", args, function (r) {
+        context.executeAction("staffhire", args, function (result) {
           S.hiring = false;
 
-          setStatus(getError(r) || "Contratacao executada.");
+          status(actionError(result) || "Contratacao executada: " + meta.label);
 
           dimension();
+          updateSprites();
         });
       });
     }
 
-    setStatus("Contratando " + meta.title + "...");
     attempt();
   }
 
   // ============================================================
-  // PRODUTIVIDADE
+  // AMOSTRAGEM
   // ============================================================
 
-  function counters(p) {
-    if (p.staffType === "mechanic") {
+  function counters(person) {
+    if (person.staffType === "mechanic") {
       return {
-        a: num(p.ridesInspected),
-        b: num(p.ridesFixed),
+        a: number(person.ridesInspected),
+        b: number(person.ridesFixed),
       };
     }
 
     return {
-      a: num(p.litterSwept),
-      b: num(p.binsEmptied),
+      a: number(person.litterSwept),
+      b: number(person.binsEmptied),
     };
   }
 
@@ -1235,38 +1281,39 @@
       members: {},
     };
 
-    getEntities("staff").forEach(function (p) {
-      if (p.staffType !== "mechanic" && p.staffType !== "handyman") {
+    entities("staff").forEach(function (person) {
+      if (person.staffType !== "mechanic" && person.staffType !== "handyman") {
         return;
       }
 
-      var c = counters(p);
+      var counts = counters(person);
 
-      var m = {
-        type: p.staffType,
-        x: num(p.x),
-        y: num(p.y),
-        a: c.a,
-        b: c.b,
+      var member = {
+        type: person.staffType,
+        x: number(person.x),
+        y: number(person.y),
+        a: counts.a,
+        b: counts.b,
         distance: 0,
         elapsed: 0,
       };
 
-      var prev = S.previous && S.previous.members[p.id];
+      var previous = S.previous && S.previous.members[person.id];
 
-      if (prev && S.previous.tick < point.tick) {
-        var dt = point.tick - S.previous.tick;
+      if (previous && S.previous.tick < point.tick) {
+        var deltaTicks = point.tick - S.previous.tick;
 
-        var dist = (Math.abs(m.x - prev.x) + Math.abs(m.y - prev.y)) / 32;
+        var distance =
+          (Math.abs(member.x - previous.x) + Math.abs(member.y - previous.y)) /
+          32;
 
-        // Descarta grandes reposicionamentos.
-        if (dt <= CFG.sampleTicks * 3 && dist <= dt / 12) {
-          m.distance = dist;
-          m.elapsed = dt;
+        if (deltaTicks <= CFG.sampleTicks * 3 && distance <= deltaTicks / 12) {
+          member.distance = distance;
+          member.elapsed = deltaTicks;
         }
       }
 
-      point.members[p.id] = m;
+      point.members[person.id] = member;
     });
 
     S.previous = point;
@@ -1289,30 +1336,36 @@
 
     var first = {};
     var last = {};
+
     var totalDistance = 0;
     var elapsed = 0;
 
     S.samples.forEach(function (point) {
       Object.keys(point.members).forEach(function (id) {
-        var m = point.members[id];
+        var member = point.members[id];
 
-        if (m.type !== type) return;
+        if (member.type !== type) {
+          return;
+        }
 
-        if (!first[id]) first[id] = m;
+        if (!first[id]) {
+          first[id] = member;
+        }
 
-        last[id] = m;
+        last[id] = member;
 
-        totalDistance += m.distance;
-        elapsed += m.elapsed;
+        totalDistance += member.distance;
+        elapsed += member.elapsed;
       });
     });
 
-    var a = 0;
-    var b = 0;
+    var completedA = 0;
+    var completedB = 0;
 
     Object.keys(last).forEach(function (id) {
-      a += Math.max(0, last[id].a - first[id].a);
-      b += Math.max(0, last[id].b - first[id].b);
+      completedA += Math.max(0, last[id].a - first[id].a);
+
+      completedB += Math.max(0, last[id].b - first[id].b);
     });
 
     var minutes =
@@ -1322,59 +1375,78 @@
     return {
       minutes: minutes,
 
-      a: minutes >= 5 ? (a * 60) / minutes : 0,
+      a: minutes >= 5 ? (completedA * 60) / minutes : 0,
 
-      b: minutes >= 5 ? (b * 60) / minutes : 0,
+      b: minutes >= 5 ? (completedB * 60) / minutes : 0,
 
-      speed: elapsed > 0 ? totalDistance / (elapsed / CFG.ticksPerMinute) : 0,
+      speed: elapsed ? totalDistance / (elapsed / CFG.ticksPerMinute) : 0,
     };
   }
 
   // ============================================================
-  // DIMENSIONAMENTO 1.9.2
+  // DIMENSIONAMENTO
   // ============================================================
 
-  function dimension() {
-    var mechanics = getStaff("mechanic").length;
-    var handymen = getStaff("handyman").length;
+  function coverageFraction(guests) {
+    if (guests <= CFG.lowOccupancyThreshold) {
+      return CFG.lowOccupancyFraction;
+    }
 
-    var mr = observation("mechanic");
-    var hr = observation("handyman");
+    var growth =
+      (guests - CFG.lowOccupancyThreshold) / (200 - CFG.lowOccupancyThreshold);
+
+    return clamp(
+      CFG.lowOccupancyFraction + growth * (1 - CFG.lowOccupancyFraction),
+      CFG.lowOccupancyFraction,
+      1,
+    );
+  }
+
+  function dimension() {
+    var mechanics = staff("mechanic").length;
+    var handymen = staff("handyman").length;
+
+    var mechanicObservation = observation("mechanic");
+
+    var handymanObservation = observation("handyman");
 
     var guests = guestCount();
-    var litter = getEntities("litter").length;
+    var litter = entities("litter").length;
 
-    var activeRides = getRides().filter(function (r) {
-      return r.status === "open" || r.status === "testing";
+    var activeRides = rides().filter(function (ride) {
+      return ride.status === "open" || ride.status === "testing";
     });
 
-    // MECANICOS - nao altera suas rondas.
     var inspections = 0;
     var repairs = 0;
 
-    activeRides.forEach(function (r) {
-      var index = Math.floor(num(r.inspectionInterval, 6));
+    activeRides.forEach(function (ride) {
+      var period =
+        CFG.inspectionPeriods[Math.floor(number(ride.inspectionInterval, 6))] ||
+        0;
 
-      var period = CFG.inspectionPeriods[index] || 0;
-
-      if (period > 0) {
+      if (period) {
         inspections += 60 / period;
       }
 
-      var reliability = clamp(num(r.reliability, 100), 0, 100);
+      var reliability = clamp(number(ride.reliability, 100), 0, 100);
 
       repairs +=
         0.08 +
         0.007 * (100 - reliability) +
-        0.002 * clamp(num(r.downtime), 0, 100);
+        0.002 * clamp(number(ride.downtime), 0, 100);
     });
 
-    if (mr.minutes >= 10) {
-      inspections = Math.max(inspections, mr.a);
-      repairs = Math.max(repairs, mr.b);
+    if (mechanicObservation.minutes >= 10) {
+      inspections = Math.max(inspections, mechanicObservation.a);
+
+      repairs = Math.max(repairs, mechanicObservation.b);
     }
 
-    var mechanicTravel = mr.speed > 0 ? clamp(12 / mr.speed, 0.15, 4) : 1.5;
+    var mechanicTravel =
+      mechanicObservation.speed > 0
+        ? clamp(12 / mechanicObservation.speed, 0.15, 4)
+        : 1.5;
 
     var mechanicWork =
       inspections * CFG.inspectionMinutes +
@@ -1385,16 +1457,21 @@
       ? Math.max(1, Math.ceil(mechanicWork / (60 * CFG.mechanicUtilization)))
       : 0;
 
-    // ZELADORES - demanda de servicos.
     var cleaning = Math.max(
       guests * 0.018,
       litter * 0.5,
-      hr.minutes >= 10 ? hr.a : 0,
+      handymanObservation.minutes >= 10 ? handymanObservation.a : 0,
     );
 
-    var bins = Math.max(guests * 0.004, hr.minutes >= 10 ? hr.b : 0);
+    var bins = Math.max(
+      guests * 0.004,
+      handymanObservation.minutes >= 10 ? handymanObservation.b : 0,
+    );
 
-    var travel = hr.speed > 0 ? clamp(6 / hr.speed, 0.1, 3) : 1;
+    var travel =
+      handymanObservation.speed > 0
+        ? clamp(6 / handymanObservation.speed, 0.1, 3)
+        : 1;
 
     var handWork =
       cleaning * CFG.sweepMinutes +
@@ -1403,75 +1480,71 @@
 
     var byWork = Math.ceil(handWork / (60 * CFG.handymanUtilization));
 
-    // NOVO: cobertura de caminhos relevantes.
-    var accessibleTiles = S.analyzed ? S.usefulTiles : 0;
+    var fraction = coverageFraction(guests);
 
-    var byCoverage =
-      accessibleTiles > 0
-        ? Math.ceil(accessibleTiles / CFG.handymanTilesPerWorker)
-        : 0;
+    var accessible = S.analyzed ? S.usefulTiles : 0;
+
+    var byCoverage = Math.ceil(
+      (accessible * fraction) / CFG.handymanTilesPerWorker,
+    );
 
     var byGuests = Math.ceil(guests / CFG.handymanGuestsPerWorker);
 
     var byLitter = Math.ceil(litter / CFG.handymanLitterPerWorker);
 
-    /*
-     * Nunca usar o numero de redes como
-     * numero minimo de zeladores.
-     */
     var handNeed = Math.max(byWork, byCoverage, byGuests, byLitter);
 
-    if (guests > 0 || litter > 0) {
+    if (guests || litter) {
       handNeed = Math.max(1, handNeed);
     }
 
-    var observedMinutes = Math.max(mr.minutes, hr.minutes);
+    var minutes = Math.max(
+      mechanicObservation.minutes,
+      handymanObservation.minutes,
+    );
 
     S.dimension = {
-      mechanicCount: mechanics,
+      mechanics: mechanics,
       mechanicNeed: mechanicNeed,
       mechanicWork: mechanicWork,
+
       inspections: inspections,
       repairs: repairs,
-      mechanicSpeed: mr.speed,
+      mechanicSpeed: mechanicObservation.speed,
 
-      handymanCount: handymen,
+      handymen: handymen,
       handymanNeed: handNeed,
-      handymanWork: handWork,
+      handWork: handWork,
+
       cleaning: cleaning,
       bins: bins,
-      handymanSpeed: hr.speed,
+      handymanSpeed: handymanObservation.speed,
 
-      byWork: byWork,
       byCoverage: byCoverage,
       byGuests: byGuests,
+      byWork: byWork,
       byLitter: byLitter,
 
-      accessibleTiles: accessibleTiles,
-      totalTiles: S.totalTiles,
+      accessible: accessible,
+      fraction: fraction,
 
       guests: guests,
       litter: litter,
 
-      minutes: observedMinutes,
+      minutes: minutes,
 
-      confidence:
-        observedMinutes >= 20
-          ? "MEDIA"
-          : observedMinutes >= 5
-            ? "BAIXA"
-            : "INICIAL",
+      confidence: minutes >= 20 ? "MEDIA" : minutes >= 5 ? "BAIXA" : "INICIAL",
     };
 
     render();
   }
 
   // ============================================================
-  // VANDALISMO OPCIONAL
+  // REPARO OPCIONAL DE VANDALISMO
   // ============================================================
 
   function repairTick() {
-    if (!getSetting("StaffZoneManager.repairEnabled", false)) {
+    if (!setting("StaffZoneManager.repairEnabled", false)) {
       return;
     }
 
@@ -1479,16 +1552,13 @@
       return;
     }
 
-    getEntities("staff").forEach(function (p) {
-      if (
-        p.staffType !== "handyman" ||
-        !getSetting("StaffZoneManager.repairhandyman", true)
-      ) {
-        return;
-      }
+    if (!setting("StaffZoneManager.repairhandyman", true)) {
+      return;
+    }
 
-      var x = tile(p.x);
-      var y = tile(p.y);
+    staff("handyman").forEach(function (person) {
+      var x = tile(person.x);
+      var y = tile(person.y);
 
       if (x < 0 || y < 0 || x >= map.size.x || y >= map.size.y) {
         return;
@@ -1496,32 +1566,33 @@
 
       var cell = map.getTile(x, y);
 
-      if (!cell) return;
+      if (!cell) {
+        return;
+      }
 
       for (var i = 0; i < cell.numElements; i++) {
-        var e = cell.getElement(i);
+        var element = cell.getElement(i);
 
         if (
-          !e ||
-          e.type !== "footpath" ||
-          !e.isAdditionBroken ||
-          e.addition == null
+          !element ||
+          element.type !== "footpath" ||
+          !element.isAdditionBroken ||
+          element.addition == null ||
+          number(element.baseZ) !== number(person.z)
         ) {
           continue;
         }
 
-        if (num(e.baseZ) !== num(p.z)) continue;
-
         if (park.getFlag("noMoney")) {
-          e.isAdditionBroken = false;
+          element.isAdditionBroken = false;
           break;
         }
 
         var object;
 
         try {
-          object = context.getObject("footpath_addition", e.addition);
-        } catch (err) {
+          object = context.getObject("footpath_addition", element.addition);
+        } catch (e) {
           continue;
         }
 
@@ -1534,12 +1605,12 @@
           {
             x: x * 32,
             y: y * 32,
-            z: num(e.baseZ),
+            z: number(element.baseZ),
             object: object.index,
           },
           function (result) {
-            if (getError(result)) {
-              console.log("Reparo: " + getError(result));
+            if (actionError(result)) {
+              console.log(actionError(result));
             }
           },
         );
@@ -1550,10 +1621,137 @@
   }
 
   // ============================================================
+  // SPRITES ESTATICOS CENTRALIZADOS
+  // ============================================================
+
+  function initThumbnails() {
+    if (S.thumbnailRange) {
+      return;
+    }
+
+    try {
+      var range = ui.imageManager.allocate(3);
+
+      if (range) {
+        S.thumbnailRange = range;
+
+        S.thumbnails.handyman = range.start;
+        S.thumbnails.security = range.start + 1;
+        S.thumbnails.entertainer = range.start + 2;
+      }
+    } catch (e) {
+      console.log("[Staff Zone Manager] Miniaturas: " + e);
+    }
+  }
+
+  function fixedSprite(type) {
+    var people = staff(type);
+
+    if (!people.length) {
+      return null;
+    }
+
+    var person = people[0];
+    var frames;
+
+    try {
+      frames = person.getAnimationSpriteIds(
+        "walking",
+
+        // VERSAO 1.9.6:
+        // Frente oposta a direcao anterior (0).
+        CFG.spriteRotation,
+      );
+    } catch (e) {
+      return null;
+    }
+
+    if (!frames || !frames.length) {
+      return null;
+    }
+
+    return typeof frames[0] === "number" && frames[0] >= 0 ? frames[0] : null;
+  }
+
+  function thumbnail(type) {
+    initThumbnails();
+
+    var target = S.thumbnails[type];
+    var sprite = fixedSprite(type);
+
+    if (target == null || sprite == null) {
+      return "guests";
+    }
+
+    if (S.sprites[type] === sprite) {
+      return target;
+    }
+
+    try {
+      var info = ui.imageManager.getImageInfo(sprite);
+
+      if (!info) {
+        return "guests";
+      }
+
+      var size = CFG.spriteSize;
+
+      var x = Math.floor((size - info.width) / 2) - info.offset.x;
+
+      var y = Math.floor((size - info.height) / 2) - info.offset.y;
+
+      ui.imageManager.draw(
+        target,
+        {
+          width: size,
+          height: size,
+        },
+        function (graphics) {
+          graphics.clear();
+
+          graphics.clip(0, 0, size, size);
+
+          graphics.image(sprite, x, y);
+        },
+      );
+
+      S.sprites[type] = sprite;
+
+      return target;
+    } catch (e) {
+      console.log("[Staff Zone Manager] Sprite " + type + ": " + e);
+
+      return "guests";
+    }
+  }
+
+  function updateSprites() {
+    if (!S.window) {
+      return;
+    }
+
+    ["handyman", "security", "entertainer"].forEach(function (type) {
+      var index = type === "handyman" ? 2 : type === "security" ? 3 : 4;
+
+      var icon = widget("icon" + index);
+
+      if (icon) {
+        icon.image = thumbnail(type);
+      }
+    });
+
+    var dimensionIcon = widget("dimension_hand_icon");
+
+    if (dimensionIcon) {
+      dimensionIcon.image = thumbnail("handyman");
+    }
+  }
+
+  // ============================================================
   // INTERFACE
   // ============================================================
 
-  function getWidget(name) {
+  function widget(name) {
     try {
       return S.window && S.window.findWidget(name);
     } catch (e) {
@@ -1561,221 +1759,218 @@
     }
   }
 
-  function text(name, value) {
-    var widget = getWidget(name);
+  function setText(name, value) {
+    var current = widget(name);
 
-    if (widget) {
-      widget.text = String(value);
+    if (current) {
+      current.text = String(value);
     }
   }
 
-  function visible(name, value) {
-    var widget = getWidget(name);
+  function show(name, visible) {
+    var current = widget(name);
 
-    if (widget) {
-      widget.isVisible = value;
+    if (current) {
+      current.isVisible = visible;
     }
   }
 
-  function verdict(current, expected) {
-    if (current < expected) {
-      return "FALTAM " + (expected - current);
+  function verdict(current, wanted) {
+    if (current < wanted) {
+      return "CONTRATAR +" + (wanted - current);
     }
 
-    if (current > expected) {
-      return "EXCEDENTE " + (current - expected);
+    if (current > wanted) {
+      return "SOBRAM " + (current - wanted);
     }
 
-    return "ADEQUADO";
+    return "OK";
   }
 
   function render() {
-    if (!S.window) return;
+    if (!S.window) {
+      return;
+    }
 
-    TAB_NAMES.forEach(function (tab, i) {
-      var selected = S.tab === i;
+    TABS.forEach(function (name, index) {
+      var current = widget("tab" + index);
 
-      var tabButton = getWidget("tab" + i);
-
-      if (tabButton) {
-        tabButton.isPressed = selected;
+      if (current) {
+        current.isPressed = S.tab === index;
       }
 
-      TAB_WIDGETS[tab].forEach(function (name) {
-        visible(name, selected);
+      TAB_WIDGETS[name].forEach(function (id) {
+        show(id, S.tab === index);
       });
     });
 
-    text("status", S.status);
+    setText("status", S.status);
 
-    text(
+    setText(
       "general1",
       "Caminhos: " +
         S.totalTiles +
-        "  |  Filas: " +
+        " | Filas: " +
         S.queueTiles +
-        "  |  Saidas: " +
+        " | Saidas: " +
         collectExits().length,
     );
 
-    text(
+    setText(
       "general2",
       "Caminhos relevantes: " +
         S.usefulTiles +
-        "  |  Redes: " +
+        " | Redes: " +
         S.components.length +
-        "  |  Conectividade: " +
+        " | " +
         S.networkMode,
     );
 
     Object.keys(TYPES).forEach(function (type) {
-      text(
+      setText(
         type + "_count",
         "Contratados: " +
-          getStaff(type).length +
-          "  |  Rondas aplicadas: " +
+          staff(type).length +
+          " | Rondas aplicadas: " +
           S.zones[type].length,
       );
     });
 
-    if (!S.dimension) return;
+    var data = S.dimension;
 
-    var d = S.dimension;
+    if (!data) {
+      return;
+    }
 
-    text(
-      "dim_observation",
+    setText(
+      "dim_history",
       "Historico: " +
-        format(d.minutes) +
-        " min simulados  |  Confianca: " +
-        d.confidence,
+        fmt(data.minutes) +
+        " min simulados | Confianca: " +
+        data.confidence,
     );
 
-    text(
-      "dim_mech1",
-      d.mechanicCount +
-        " contratados / " +
-        d.mechanicNeed +
-        " recomendados  |  " +
-        verdict(d.mechanicCount, d.mechanicNeed),
+    setText(
+      "dim_mech_result",
+      "MECANICOS: " + verdict(data.mechanics, data.mechanicNeed),
     );
 
-    text(
-      "dim_mech2",
+    setText(
+      "dim_mech_count",
+      data.mechanics + " contratados / " + data.mechanicNeed + " recomendados",
+    );
+
+    setText(
+      "dim_mech_detail",
       "Inspecoes: " +
-        format(d.inspections) +
-        "/h  |  Reparos: " +
-        format(d.repairs) +
-        "/h",
-    );
-
-    text(
-      "dim_mech3",
-      "Trabalho: " +
-        format(d.mechanicWork) +
-        " min/h  |  Velocidade: " +
-        format(d.mechanicSpeed) +
-        " tiles/min",
-    );
-
-    text(
-      "dim_hand1",
-      d.handymanCount +
-        " contratados / " +
-        d.handymanNeed +
-        " recomendados  |  " +
-        verdict(d.handymanCount, d.handymanNeed),
-    );
-
-    text(
-      "dim_hand2",
-      "Por caminhos: " +
-        d.byCoverage +
-        "  |  Por visitantes: " +
-        d.byGuests +
-        "  |  Por sujeira: " +
-        d.byLitter,
-    );
-
-    text(
-      "dim_hand3",
-      "Por carga de trabalho: " +
-        d.byWork +
-        "  |  Trabalho: " +
-        format(d.handymanWork) +
+        fmt(data.inspections) +
+        "/h | Reparos: " +
+        fmt(data.repairs) +
+        "/h | Carga: " +
+        fmt(data.mechanicWork) +
         " min/h",
     );
 
-    text(
-      "dim_hand4",
-      "Caminhos relevantes: " +
-        d.accessibleTiles +
-        "  |  Visitantes: " +
-        d.guests +
-        "  |  Lixo: " +
-        d.litter,
+    setText(
+      "dim_mech_speed",
+      "Velocidade: " + fmt(data.mechanicSpeed) + " tiles/min | Meta: 75%",
     );
 
-    text(
-      "dim_hand5",
-      "Velocidade observada: " +
-        format(d.handymanSpeed) +
-        " tiles/min  |  Meta: 80%",
+    setText(
+      "dim_hand_result",
+      "ZELADORES: " + verdict(data.handymen, data.handymanNeed),
     );
 
-    text(
-      "dim_note",
-      "85 tiles/zelador e 170 visitantes/zelador: " +
-        "parametros experimentais.",
+    setText(
+      "dim_hand_count",
+      data.handymen + " contratados / " + data.handymanNeed + " recomendados",
     );
 
-    text(
+    setText(
+      "dim_hand_detail",
+      "Por caminhos: " +
+        data.byCoverage +
+        " | Visitantes: " +
+        data.byGuests +
+        " | Sujeira: " +
+        data.byLitter +
+        " | Carga: " +
+        data.byWork,
+    );
+
+    setText(
+      "dim_hand_stats",
+      "Visitantes: " +
+        data.guests +
+        " | Lixo: " +
+        data.litter +
+        " | Caminhos: " +
+        data.accessible +
+        " (" +
+        Math.round(data.fraction * 100) +
+        "% ponderado)",
+    );
+
+    setText(
+      "dim_hand_speed",
+      "Velocidade: " +
+        fmt(data.handymanSpeed) +
+        " tiles/min | Trabalho: " +
+        fmt(data.handWork) +
+        " min/h",
+    );
+
+    setText(
       "handyman_coverage",
       "Cobertura: " +
-        S.usefulTiles +
-        " tiles relevantes  |  Meta: " +
-        CFG.handymanTilesPerWorker +
-        " tiles/zelador",
+        fmt(data.accessible * data.fraction) +
+        " tiles ponderados de " +
+        data.accessible,
     );
   }
 
-  function add(widgets, tab, widget) {
-    widget.isVisible = false;
-    widgets.push(widget);
-    TAB_WIDGETS[tab].push(widget.name);
+  function add(widgets, tab, definition) {
+    definition.isVisible = false;
+
+    widgets.push(definition);
+
+    TAB_WIDGETS[tab].push(definition.name);
   }
 
-  function label(widgets, tab, name, content, x, y, width) {
+  function label(widgets, tab, id, content, x, y, width) {
     add(widgets, tab, {
       type: "label",
-      name: name,
+      name: id,
       x: x,
       y: y,
-      width: width || 620,
-      height: 19,
+      width: width || 630,
+      height: 18,
       text: content || "",
     });
   }
 
-  function button(widgets, tab, name, content, x, y, width, callback) {
+  function button(widgets, tab, id, title, x, y, width, callback) {
     add(widgets, tab, {
       type: "button",
-      name: name,
+      name: id,
       x: x,
       y: y,
       width: width,
       height: 24,
-      text: content,
+      text: title,
       onClick: callback,
     });
   }
 
   function openWindow() {
-    if (typeof ui === "undefined") return;
+    if (typeof ui === "undefined") {
+      return;
+    }
 
-    var old = ui.getWindow(WINDOW);
+    var existing = ui.getWindow(WID);
 
-    if (old) {
-      old.bringToFront();
+    if (existing) {
+      existing.bringToFront();
       return;
     }
 
@@ -1783,50 +1978,50 @@
       TAB_WIDGETS[name] = [];
     });
 
+    initThumbnails();
+
     var widgets = [];
 
-    /*
-     * Icones aprovados: Geral, Mecanicos, Dimensionar.
-     * Outros: letras Z, S, A para evitar sprites errados.
-     */
-    var icons = ["park", "mechanic", null, null, null, "graph"];
+    var icons = [
+      "park",
+      "mechanic",
+      thumbnail("handyman"),
+      thumbnail("security"),
+      thumbnail("entertainer"),
+      "graph",
+    ];
 
-    var initials = ["", "", "Z", "S", "A", ""];
+    // ========================================================
+    // ABAS
+    // ========================================================
 
-    for (var i = 0; i < TAB_NAMES.length; i++) {
+    for (var i = 0; i < TABS.length; i++) {
       (function (index) {
-        var x = 10 + index * 110;
+        var x = 9 + index * 111;
 
-        var iconButton = {
+        widgets.push({
           type: "button",
           name: "icon" + index,
           x: x,
-          y: 22,
-          width: 23,
-          height: 23,
-          tooltip: TAB_LABELS[index],
+          y: 23,
+          width: 29,
+          height: 28,
+          image: icons[index],
+          tooltip: LABELS[index],
           onClick: function () {
             S.tab = index;
             render();
           },
-        };
-
-        if (icons[index]) {
-          iconButton.image = icons[index];
-        } else {
-          iconButton.text = initials[index];
-        }
-
-        widgets.push(iconButton);
+        });
 
         widgets.push({
           type: "button",
           name: "tab" + index,
-          x: x + 25,
-          y: 22,
-          width: 81,
-          height: 23,
-          text: TAB_LABELS[index],
+          x: x + 30,
+          y: 23,
+          width: 79,
+          height: 28,
+          text: LABELS[index],
           onClick: function () {
             S.tab = index;
             render();
@@ -1835,22 +2030,25 @@
       })(i);
     }
 
-    TAB_NAMES.forEach(function (tab, index) {
-      add(widgets, tab, {
+    TABS.forEach(function (name, index) {
+      add(widgets, name, {
         type: "groupbox",
-        name: "group_" + tab,
+        name: "group_" + name,
         x: 10,
-        y: 55,
-        width: 656,
-        height: 340,
-        text: TAB_LABELS[index],
+        y: 59,
+        width: 663,
+        height: 327,
+        text: LABELS[index],
       });
     });
 
-    // VISAO GERAL
+    // ========================================================
+    // GERAL
+    // ========================================================
 
-    label(widgets, "general", "general1", "", 25, 87);
-    label(widgets, "general", "general2", "", 25, 115);
+    label(widgets, "general", "general1", "", 25, 92);
+
+    label(widgets, "general", "general2", "", 25, 120);
 
     button(
       widgets,
@@ -1858,53 +2056,59 @@
       "analyze",
       "Analisar parque",
       25,
-      160,
+      165,
       160,
       analyze,
     );
 
     add(widgets, "general", {
       type: "checkbox",
-      name: "repair_enabled",
+      name: "repair_on",
       x: 25,
-      y: 214,
+      y: 220,
       width: 350,
       height: 18,
       text: "Ativar reparo de vandalismo",
-      isChecked: !!getSetting("StaffZoneManager.repairEnabled", false),
+
+      isChecked: !!setting("StaffZoneManager.repairEnabled", false),
+
       onChange: function (value) {
-        setSetting("StaffZoneManager.repairEnabled", !!value);
+        saveSetting("StaffZoneManager.repairEnabled", !!value);
       },
     });
 
     add(widgets, "general", {
       type: "checkbox",
-      name: "repair_handyman",
+      name: "repair_hand",
       x: 25,
-      y: 240,
+      y: 247,
       width: 350,
       height: 18,
       text: "Zeladores reparam vandalismo",
-      isChecked: !!getSetting("StaffZoneManager.repairhandyman", true),
+
+      isChecked: !!setting("StaffZoneManager.repairhandyman", true),
+
       onChange: function (value) {
-        setSetting("StaffZoneManager.repairhandyman", !!value);
+        saveSetting("StaffZoneManager.repairhandyman", !!value);
       },
     });
 
     label(
       widgets,
       "general",
-      "general_info",
-      "As contratacoes e rondas sao manuais.",
+      "general_note",
+      "Contratacoes e rondas so acontecem quando voce clicar.",
       25,
-      295,
+      306,
     );
 
-    // ABAS DE FUNCIONARIOS
+    // ========================================================
+    // FUNCIONARIOS
+    // ========================================================
 
     ["mechanic", "handyman", "security", "entertainer"].forEach(
       function (type) {
-        label(widgets, type, type + "_count", "", 25, 94);
+        label(widgets, type, type + "_count", "", 25, 96);
 
         button(
           widgets,
@@ -1912,7 +2116,7 @@
           type + "_hire",
           "Contratar +1",
           25,
-          144,
+          145,
           140,
           function () {
             hire(type);
@@ -1925,7 +2129,7 @@
           type + "_generate",
           "Gerar rondas",
           175,
-          144,
+          145,
           140,
           function () {
             generate(type);
@@ -1938,46 +2142,51 @@
           type + "_clear",
           "Limpar rondas",
           325,
-          144,
+          145,
           140,
           function () {
             clearPatrols(type);
           },
         );
 
-        var info =
-          type === "mechanic"
-            ? "Rondas pelas saidas das atracoes."
-            : type === "handyman"
-              ? "Rondas por caminhos e filas."
-              : "Rondas nas areas movimentadas.";
+        var hint;
 
-        label(widgets, type, type + "_info", info, 25, 207);
+        if (type === "mechanic") {
+          hint = "Mecanicos usam saidas das atracoes.";
+        } else if (type === "handyman") {
+          hint = "Zeladores cobrem caminhos e filas.";
+        } else {
+          hint = "Rondas baseadas nas areas movimentadas.";
+        }
+
+        label(widgets, type, type + "_hint", hint, 25, 211);
 
         label(
           widgets,
           type,
-          type + "_help",
-          "Consulte Dimensionar para a equipe recomendada.",
+          type + "_tip",
+          "Consulte Dimensionar para comparar contratados e recomendados.",
           25,
-          246,
+          247,
         );
       },
     );
 
-    label(widgets, "handyman", "handyman_coverage", "", 25, 280);
+    label(widgets, "handyman", "handyman_coverage", "", 25, 282);
 
+    // ========================================================
     // DIMENSIONAMENTO
+    // ========================================================
 
-    label(widgets, "dimension", "dim_observation", "", 25, 80);
+    label(widgets, "dimension", "dim_history", "", 25, 83);
 
     add(widgets, "dimension", {
       type: "button",
-      name: "dim_mechanic_icon",
+      name: "dimension_mech_icon",
       x: 25,
-      y: 108,
-      width: 23,
-      height: 23,
+      y: 112,
+      width: 28,
+      height: 28,
       image: "mechanic",
       tooltip: "Mecanicos",
       onClick: function () {
@@ -1986,22 +2195,22 @@
       },
     });
 
-    label(widgets, "dimension", "dim_mechanic_title", "MECANICOS", 55, 112);
+    label(widgets, "dimension", "dim_mech_result", "", 62, 120);
 
-    label(widgets, "dimension", "dim_mech1", "", 25, 140);
+    label(widgets, "dimension", "dim_mech_count", "", 25, 151);
 
-    label(widgets, "dimension", "dim_mech2", "", 25, 163);
+    label(widgets, "dimension", "dim_mech_detail", "", 25, 174);
 
-    label(widgets, "dimension", "dim_mech3", "", 25, 186);
+    label(widgets, "dimension", "dim_mech_speed", "", 25, 197);
 
     add(widgets, "dimension", {
       type: "button",
-      name: "dim_handyman_icon",
+      name: "dimension_hand_icon",
       x: 25,
-      y: 224,
-      width: 23,
-      height: 23,
-      text: "Z",
+      y: 233,
+      width: 28,
+      height: 28,
+      image: thumbnail("handyman"),
       tooltip: "Zeladores",
       onClick: function () {
         S.tab = 2;
@@ -2009,48 +2218,46 @@
       },
     });
 
-    label(widgets, "dimension", "dim_handyman_title", "ZELADORES", 55, 228);
+    label(widgets, "dimension", "dim_hand_result", "", 62, 241);
 
-    label(widgets, "dimension", "dim_hand1", "", 25, 254);
+    label(widgets, "dimension", "dim_hand_count", "", 25, 272);
 
-    label(widgets, "dimension", "dim_hand2", "", 25, 277);
+    label(widgets, "dimension", "dim_hand_detail", "", 25, 295);
 
-    label(widgets, "dimension", "dim_hand3", "", 25, 300);
+    label(widgets, "dimension", "dim_hand_stats", "", 25, 318);
 
-    label(widgets, "dimension", "dim_hand4", "", 25, 323);
-
-    label(widgets, "dimension", "dim_hand5", "", 25, 346);
-
-    label(widgets, "dimension", "dim_note", "", 25, 380);
+    label(widgets, "dimension", "dim_hand_speed", "", 25, 341);
 
     button(
       widgets,
       "dimension",
       "recalculate",
-      "Recalcular",
-      510,
-      375,
-      135,
+      "Recalcular demanda",
+      493,
+      394,
+      166,
       dimension,
     );
 
-    // STATUS PERMANENTE
+    // ========================================================
+    // STATUS
+    // ========================================================
 
     widgets.push({
       type: "label",
       name: "status",
-      x: 12,
-      y: 427,
-      width: 650,
-      height: 35,
+      x: 13,
+      y: 435,
+      width: 660,
+      height: 32,
       text: S.status,
     });
 
     S.window = ui.openWindow({
-      classification: WINDOW,
+      classification: WID,
       title: "Staff Zone Manager " + VERSION,
-      width: 676,
-      height: 468,
+      width: 684,
+      height: 475,
       colours: [24, 24],
       widgets: widgets,
       onClose: function () {
@@ -2062,14 +2269,16 @@
 
     render();
     dimension();
+    updateSprites();
   }
 
   // ============================================================
-  // CICLO DE VIDA
+  // RESET
   // ============================================================
 
   function reset() {
     S.analyzed = false;
+
     S.normalNodes = [];
     S.normalMap = {};
     S.handNodes = [];
@@ -2081,6 +2290,7 @@
     S.usefulTiles = 0;
     S.totalTiles = 0;
     S.queueTiles = 0;
+
     S.networkMode = "nao analisada";
 
     S.samples = [];
@@ -2094,8 +2304,12 @@
       entertainer: [],
     };
 
-    setStatus("Mapa alterado. Clique em Analisar parque.");
+    status("Mapa alterado. Clique em Analisar parque.");
   }
+
+  // ============================================================
+  // MAIN
+  // ============================================================
 
   function main() {
     if (typeof ui !== "undefined") {
@@ -2120,6 +2334,7 @@
 
         if (S.window) {
           dimension();
+          updateSprites();
         }
       }
 
